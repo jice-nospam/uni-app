@@ -194,11 +194,13 @@ fn find_fullscreen_mode(
     config: &AppConfig,
 ) -> Option<glutin::monitor::VideoMode> {
     let mut video_mode = None;
+    let mut smallest = 40000 * 40000;
     for mode in monitor.video_modes() {
         let size = mode.size();
-        if size.width >= config.size.0 && size.height >= config.size.1 {
+        let surf = size.width * size.height;
+        if size.width >= config.size.0 && size.height >= config.size.1 && surf < smallest {
             video_mode = Some(mode);
-            break;
+            smallest = surf;
         }
     }
     video_mode

@@ -10,8 +10,6 @@ This library provides a native/wasm compatibility layer for following components
 * Input (mouse + keyboard)
 * File system (ready-only)
 
-**This project is under heavily development, all api are very unstable until version 0.2**
-
 ## Usage
 
 ```toml
