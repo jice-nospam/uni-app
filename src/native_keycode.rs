@@ -1,5 +1,5 @@
-use glutin::VirtualKeyCode;
-use glutin::VirtualKeyCode::*;
+use glutin::event::VirtualKeyCode;
+use glutin::event::VirtualKeyCode::*;
 
 pub fn translate_virtual_key(c: VirtualKeyCode) -> &'static str {
     match c {
@@ -55,6 +55,15 @@ pub fn translate_virtual_key(c: VirtualKeyCode) -> &'static str {
         F13 => "F13",
         F14 => "F14",
         F15 => "F15",
+        F16 => "F16",
+        F17 => "F17",
+        F18 => "F18",
+        F19 => "F19",
+        F20 => "F20",
+        F21 => "F21",
+        F22 => "F22",
+        F23 => "F23",
+        F24 => "F24",
         Snapshot => "",
         Scroll => "ScrollLock",
         Pause => "Pause",

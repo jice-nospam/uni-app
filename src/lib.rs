@@ -163,7 +163,7 @@ pub enum AppEvent {
     CharEvent(char),
     /// window resize
     Resized((u32, u32)),
-    /// mouse cursor position in pixels from the window top-left
+    /// mouse cursor position in physical pixels from the window top-left
     MousePos((f64, f64)),
     /// window close button was pressed and [`AppConfig.intercept_close_request`] is true
     CloseRequested,

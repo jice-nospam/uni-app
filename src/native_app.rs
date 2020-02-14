@@ -1,7 +1,7 @@
 mod native_keycode;
 
 use glutin;
-use glutin::{ElementState, Event, MouseButton, WindowEvent};
+use glutin::event::{ElementState, Event, MouseButton, WindowEvent};
 use std::cell::RefCell;
 use std::env;
 use std::os::raw::c_void;
@@ -16,34 +16,19 @@ use self::native_keycode::{translate_scan_code, translate_virtual_key};
 use super::events;
 
 enum WindowContext {
-    Normal(glutin::GlWindow),
-    Headless(glutin::HeadlessContext),
+    Normal(glutin::WindowedContext<glutin::PossiblyCurrent>),
+    Headless(glutin::Context<glutin::NotCurrent>),
 }
 
 impl WindowContext {
-    fn hidpi_factor(&self) -> f32 {
+    fn hidpi_factor(&self) -> f64 {
         match self {
-            WindowContext::Normal(ref w) => w.get_hidpi_factor() as f32,
+            WindowContext::Normal(ref w) => w.window().scale_factor(),
             _ => 1.0,
         }
     }
 
-    fn window(&self) -> &glutin::GlWindow {
-        match self {
-            WindowContext::Normal(ref w) => w,
-            _ => unimplemented!(),
-        }
-    }
-
-    fn context(&self) -> &dyn glutin::GlContext {
-        match self {
-            WindowContext::Normal(ref w) => w,
-            WindowContext::Headless(ref w) => w,
-        }
-    }
-
     fn swap_buffers(&self) -> Result<(), glutin::ContextError> {
-        use glutin::GlContext;
         match self {
             WindowContext::Normal(ref w) => w.swap_buffers(),
             WindowContext::Headless(_) => Ok(()),
@@ -54,13 +39,15 @@ impl WindowContext {
 /// the main application struct
 pub struct App {
     window: WindowContext,
-    events_loop: glutin::EventsLoop,
+    events_loop: glutin::event_loop::EventLoop<()>,
     exiting: bool,
-    intercept_close_request: bool,
+    modifiers: glutin::event::ModifiersState,
     pub events: Rc<RefCell<Vec<AppEvent>>>,
+    config: AppConfig,
+    monitor: glutin::monitor::MonitorHandle,
 }
 
-fn get_virtual_key(input: glutin::KeyboardInput) -> String {
+fn get_virtual_key(input: glutin::event::KeyboardInput) -> String {
     match input.virtual_keycode {
         Some(k) => {
             let mut s = translate_virtual_key(k).into();
@@ -73,11 +60,14 @@ fn get_virtual_key(input: glutin::KeyboardInput) -> String {
     }
 }
 
-fn get_scan_code(input: glutin::KeyboardInput) -> String {
+fn get_scan_code(input: glutin::event::KeyboardInput) -> String {
     translate_scan_code(input.scancode).into()
 }
 
-fn translate_event(e: glutin::Event, dpi_factor: f32) -> Option<AppEvent> {
+fn translate_event(
+    e: glutin::event::Event<()>,
+    modifiers: glutin::event::ModifiersState,
+) -> Option<AppEvent> {
     if let Event::WindowEvent {
         event: winevent, ..
     } = e
@@ -97,31 +87,26 @@ fn translate_event(e: glutin::Event, dpi_factor: f32) -> Option<AppEvent> {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let phys =
-                    glutin::dpi::PhysicalPosition::from_logical(position, f64::from(dpi_factor));
-                Some(AppEvent::MousePos(phys.into()))
+                Some(AppEvent::MousePos((position.x, position.y)))
             }
             WindowEvent::KeyboardInput { input, .. } => match input.state {
                 ElementState::Pressed => Some(AppEvent::KeyDown(events::KeyDownEvent {
                     key: get_virtual_key(input),
                     code: get_scan_code(input),
-                    shift: input.modifiers.shift,
-                    alt: input.modifiers.alt,
-                    ctrl: input.modifiers.ctrl,
+                    shift: modifiers.shift(),
+                    alt: modifiers.alt(),
+                    ctrl: modifiers.ctrl(),
                 })),
                 ElementState::Released => Some(AppEvent::KeyUp(events::KeyUpEvent {
                     key: get_virtual_key(input),
                     code: get_scan_code(input),
-                    shift: input.modifiers.shift,
-                    alt: input.modifiers.alt,
-                    ctrl: input.modifiers.ctrl,
+                    shift: modifiers.shift(),
+                    alt: modifiers.alt(),
+                    ctrl: modifiers.ctrl(),
                 })),
             },
             WindowEvent::ReceivedCharacter(c) => Some(AppEvent::CharEvent(c)),
-            WindowEvent::Resized(size) => {
-                let phys = glutin::dpi::PhysicalSize::from_logical(size, f64::from(dpi_factor));
-                Some(AppEvent::Resized(phys.into()))
-            }
+            WindowEvent::Resized(size) => Some(AppEvent::Resized(size.into())),
             WindowEvent::CloseRequested => Some(AppEvent::CloseRequested),
             _ => None,
         }
@@ -130,72 +115,128 @@ fn translate_event(e: glutin::Event, dpi_factor: f32) -> Option<AppEvent> {
     }
 }
 
+fn gl_version() -> glutin::GlRequest {
+    glutin::GlRequest::GlThenGles {
+        opengl_version: (3, 2),
+        opengles_version: (2, 0),
+    }
+}
+
+fn new_headless_context(
+    config: &AppConfig,
+    event_loop: &glutin::event_loop::EventLoop<()>,
+) -> WindowContext {
+    let context = glutin::ContextBuilder::new()
+        .with_gl(gl_version())
+        .with_gl_profile(glutin::GlProfile::Core)
+        .build_headless(
+            event_loop,
+            glutin::dpi::PhysicalSize::new(config.size.0, config.size.1),
+        )
+        .unwrap();
+
+    WindowContext::Headless(context)
+}
+
+fn new_fullscreen_context(
+    config: &AppConfig,
+    event_loop: &glutin::event_loop::EventLoop<()>,
+    video_mode: glutin::monitor::VideoMode,
+) -> WindowContext {
+    let window_builder = glutin::window::WindowBuilder::new()
+        .with_title(&config.title)
+        .with_fullscreen(Some(glutin::window::Fullscreen::Exclusive(video_mode)))
+        .into();
+    let context = glutin::ContextBuilder::new()
+        .with_vsync(config.vsync)
+        .with_gl(gl_version())
+        .with_gl_profile(glutin::GlProfile::Core)
+        .build_windowed(window_builder, event_loop)
+        .unwrap();
+    if !config.show_cursor {
+        context.window().set_cursor_visible(false);
+    }
+    let context = unsafe { context.make_current() }.unwrap();
+    WindowContext::Normal(context)
+}
+
+fn new_windowed_context(
+    config: &AppConfig,
+    event_loop: &glutin::event_loop::EventLoop<()>,
+) -> WindowContext {
+    let scale_factor = event_loop.primary_monitor().scale_factor();
+    let window_builder = glutin::window::WindowBuilder::new()
+        .with_title(&config.title)
+        .with_resizable(config.resizable)
+        .with_inner_size(glutin::dpi::PhysicalSize::<u32>::from((
+            (f64::from(config.size.0) * scale_factor) as u32,
+            (f64::from(config.size.1) * scale_factor) as u32,
+        )))
+        .into();
+
+    let context = glutin::ContextBuilder::new()
+        .with_vsync(config.vsync)
+        .with_gl(gl_version())
+        .with_gl_profile(glutin::GlProfile::Core)
+        .build_windowed(window_builder, event_loop)
+        .unwrap();
+
+    if !config.show_cursor {
+        context.window().set_cursor_visible(false);
+    }
+    let context = unsafe { context.make_current() }.unwrap();
+
+    WindowContext::Normal(context)
+}
+
+fn find_fullscreen_mode(
+    monitor: &glutin::monitor::MonitorHandle,
+    config: &AppConfig,
+) -> Option<glutin::monitor::VideoMode> {
+    let mut video_mode = None;
+    for mode in monitor.video_modes() {
+        let size = mode.size();
+        if size.width >= config.size.0 && size.height >= config.size.1 {
+            video_mode = Some(mode);
+            break;
+        }
+    }
+    video_mode
+}
+
 impl App {
     /// create a new game window
     pub fn new(config: AppConfig) -> App {
-        use glutin::*;
-        let events_loop = glutin::EventsLoop::new();
-        let gl_req = GlRequest::GlThenGles {
-            opengl_version: (3, 2),
-            opengles_version: (2, 0),
-        };
+        let events_loop = glutin::event_loop::EventLoop::new();
+        let monitor = events_loop.primary_monitor();
 
         let window = if config.headless {
-            let context = glutin::HeadlessRendererBuilder::new(config.size.0, config.size.1)
-                .with_gl(gl_req)
-                .with_gl_profile(GlProfile::Core)
-                .build()
-                .unwrap();
-
-            WindowContext::Headless(context)
-        } else {
-            let monitor = if config.fullscreen {
-                events_loop.get_available_monitors().nth(0)
+            new_headless_context(&config, &events_loop)
+        } else if config.fullscreen {
+            if let Some(video_mode) = find_fullscreen_mode(&monitor, &config) {
+                new_fullscreen_context(&config, &events_loop, video_mode)
             } else {
-                None
-            };
-
-            let window = glutin::WindowBuilder::new()
-                .with_title(config.title)
-                .with_fullscreen(monitor)
-                .with_resizable(config.resizable)
-                .with_dimensions((config.size.0, config.size.1).into());
-
-            let context = glutin::ContextBuilder::new()
-                .with_vsync(config.vsync)
-                .with_gl(gl_req)
-                .with_gl_profile(GlProfile::Core);
-
-            let gl_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
-
-            if !config.show_cursor {
-                gl_window.hide_cursor(true);
+                new_windowed_context(&config, &events_loop)
             }
-
-            WindowContext::Normal(gl_window)
+        } else {
+            new_windowed_context(&config, &events_loop)
         };
-
-        unsafe {
-            window.context().make_current().unwrap();
-        }
 
         App {
             window,
             events_loop,
             exiting: false,
-            intercept_close_request: config.intercept_close_request,
             events: Rc::new(RefCell::new(Vec::new())),
+            modifiers: Default::default(),
+            config,
+            monitor,
         }
     }
 
     /// return the screen resolution in physical pixels
     pub fn get_screen_resolution(&self) -> (u32, u32) {
         if let WindowContext::Normal(ref glwindow) = self.window {
-            glwindow
-                .window()
-                .get_current_monitor()
-                .get_dimensions()
-                .into()
+            glwindow.window().current_monitor().size().into()
         } else {
             (0, 0)
         }
@@ -212,9 +253,13 @@ impl App {
     pub fn set_fullscreen(&self, b: bool) {
         if let WindowContext::Normal(ref glwindow) = self.window {
             if b {
-                glwindow.set_fullscreen(Some(glwindow.window().get_current_monitor()));
+                if let Some(video_mode) = find_fullscreen_mode(&self.monitor, &self.config) {
+                    glwindow
+                        .window()
+                        .set_fullscreen(Some(glutin::window::Fullscreen::Exclusive(video_mode)));
+                }
             } else {
-                glwindow.set_fullscreen(None);
+                glwindow.window().set_fullscreen(None);
             }
         }
     }
@@ -230,12 +275,16 @@ impl App {
     }
 
     /// returns the HiDPI factor for current screen
-    pub fn hidpi_factor(&self) -> f32 {
+    pub fn hidpi_factor(&self) -> f64 {
         self.window.hidpi_factor()
     }
 
     fn get_proc_address(&self, name: &str) -> *const c_void {
-        self.window.context().get_proc_address(name) as *const c_void
+        if let WindowContext::Normal(ref glwindow) = self.window {
+            glwindow.get_proc_address(name) as *const c_void
+        } else {
+            unreachable!()
+        }
     }
 
     /// return the opengl context for this window
@@ -243,86 +292,67 @@ impl App {
         Box::new(move |name| self.get_proc_address(name))
     }
 
-    fn handle_events(&mut self) -> bool {
-        use glutin::*;
+    fn handle_event(&mut self, event: glutin::event::Event<()>) -> bool {
         let mut running = true;
 
-        let dpi_factor = self.hidpi_factor();
-        let (window, events_loop, events) = (&self.window, &mut self.events_loop, &mut self.events);
-        let intercept_close_request = self.intercept_close_request;
-        events_loop.poll_events(|event| {
-            match event {
-                glutin::Event::WindowEvent { ref event, .. } => match event {
-                    &glutin::WindowEvent::CloseRequested => {
-                        if !intercept_close_request {
-                            running = false;
+        let (window, events) = (&self.window, &mut self.events);
+        let intercept_close_request = self.config.intercept_close_request;
+        match event {
+            glutin::event::Event::WindowEvent { ref event, .. } => match event {
+                &glutin::event::WindowEvent::CloseRequested => {
+                    if !intercept_close_request {
+                        running = false;
+                    }
+                }
+                &glutin::event::WindowEvent::Resized(size) => {
+                    // Fixed for Windows which minimized to emit a Resized(0,0) event
+                    if size.width != 0 && size.height != 0 {
+                        if let WindowContext::Normal(glwindow) = window {
+                            glwindow.resize(size);
                         }
                     }
-                    &glutin::WindowEvent::Resized(size) => {
-                        // Fixed for Windows which minimized to emit a Resized(0,0) event
-                        if size.width != 0.0 && size.height != 0.0 {
-                            window.window().resize(size.to_physical(dpi_factor as f64));
-                        }
-                    }
-                    &glutin::WindowEvent::KeyboardInput { input, .. } => {
-                        // issue tracked in https://github.com/tomaka/winit/issues/41
-                        // Right now we handle it manually.
-                        if cfg!(target_os = "macos") {
-                            if let Some(keycode) = input.virtual_keycode {
-                                if keycode == VirtualKeyCode::Q && input.modifiers.logo {
-                                    running = false;
-                                }
+                }
+                &glutin::event::WindowEvent::KeyboardInput { input, .. } => {
+                    // issue tracked in https://github.com/tomaka/winit/issues/41
+                    // Right now we handle it manually.
+                    if cfg!(target_os = "macos") {
+                        if let Some(keycode) = input.virtual_keycode {
+                            if keycode == glutin::event::VirtualKeyCode::Q && self.modifiers.logo()
+                            {
+                                running = false;
                             }
                         }
                     }
-                    _ => (),
-                },
+                }
                 _ => (),
-            };
-
-            translate_event(event, dpi_factor).map(|evt| events.borrow_mut().push(evt));
-        });
+            },
+            _ => (),
+        };
+        translate_event(event, self.modifiers).map(|evt| events.borrow_mut().push(evt));
 
         return running;
     }
 
-    pub fn poll_events<F>(&mut self, callback: F) -> bool
-    where
-        F: FnOnce(&mut Self) -> (),
-    {
-        if !self.handle_events() {
-            return false;
-        }
-
-        callback(self);
-        self.events.borrow_mut().clear();
-        self.window.swap_buffers().unwrap();
-
-        !self.exiting
-    }
-
     /// start the game loop, calling provided callback every frame
-    pub fn run<'a, F>(mut self, mut callback: F)
+    pub fn run<'a, F: 'static>(mut self, mut callback: F)
     where
         F: FnMut(&mut Self) -> (),
     {
-        let mut running = true;
+        let events_loop =
+            std::mem::replace(&mut self.events_loop, glutin::event_loop::EventLoop::new());
+        events_loop.run(move |event, _window_target, control_flow| {
+            if !self.handle_event(event) {
+                *control_flow = glutin::event_loop::ControlFlow::Exit;
+            } else {
+                callback(&mut self);
+                self.events.borrow_mut().clear();
+                self.window.swap_buffers().unwrap();
 
-        while running {
-            running = self.handle_events();
-
-            if !running {
-                break;
+                if self.exiting {
+                    *control_flow = glutin::event_loop::ControlFlow::Exit;
+                }
             }
-
-            callback(&mut self);
-            self.events.borrow_mut().clear();
-            self.window.swap_buffers().unwrap();
-
-            if self.exiting {
-                break;
-            }
-        }
+        });
     }
 }
 

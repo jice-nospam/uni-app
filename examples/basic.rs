@@ -12,6 +12,11 @@ fn main() {
         fullscreen: false,
         intercept_close_request: false,
     });
+    uni_app::App::print(format!(
+        "screen size {:?} hidpi_factor {}\n",
+        app.get_screen_resolution(),
+        app.hidpi_factor()
+    ));
     // start game loop
     app.run(move |app: &mut uni_app::App| {
         for evt in app.events.borrow().iter() {
